@@ -39,6 +39,25 @@ segregation_func <- function(state, counties, region) {
 
 #* Section 1-1. Create Income Segregation Index -------------------- 
 
+#** A. Read Income Cutoff Data -----------------------------------
+
+# Read the income cutoffs for each city
+if (region=="nyc") { wts <- read.csv("weights_nyc.csv")
+} else if (region=="sfb") { wts <- read.csv("weights_sfb.csv") }
+
+wts <- wts %>%
+  mutate(county_id = ifelse(nchar(county_id)==4,
+          as.character(paste0("0", county_id)), as.character(county_id)))
+
+# Find the closest matching value in the census income categories
+census_inc_category <- c(10000, 14999, 19999, 24999, 29999, 34999, 39999, 44999,
+                          49999, 59999, 74999, 999999, 124999, 14999, 19999, 200000)
+
+# Locate the indices for the closest matching values
+wts$AMI80_loc <- sapply(wts$AMI80, function(x) which.min(abs(census_inc_category - x)))
+wts$AMI120_loc <- sapply(wts$AMI120, function(x) which.min(abs(census_inc_category - x)))
+wts$AMI165_loc <- sapply(wts$AMI165, function(x) which.min(abs(census_inc_category - x)))
+
 #** A. Block Groups ------------------------------------------------
 
 # Load the income and race variables from ACS
@@ -62,79 +81,49 @@ segregation_func <- function(state, counties, region) {
 
 all_data <- bind_rows(data_list, .id = "column_label")
 
-# Check the variables in the imported data
-table(all_data$variable) #001~017
+# Convert into a long format
+data_wide <- spread(all_data, key = "variable", value = "estimate")
 
 # Unlist the data and add variables for calculation
-acs_income <- all_data %>% 
-   data.frame() %>%
-   mutate(YEAR = as.integer(column_label) + 2012) %>%
-   mutate(inc_category_raw = ifelse(variable=="B19001_001", "Total",
-    ifelse(variable=="B19001_002", "Less than $10,000",
-      ifelse(variable=="B19001_003", "$10,000 to $14,999",
-        ifelse(variable=="B19001_004", "$15,000 to $19,999",
-          ifelse(variable=="B19001_005", "$20,000 to $24,999",
-            ifelse(variable=="B19001_006", "$25,000 to $29,999",
-              ifelse(variable=="B19001_007", "$30,000 to $34,999",
-                ifelse(variable=="B19001_008", "$35,000 to $39,999",
-                  ifelse(variable=="B19001_009", "$40,000 to $44,999",
-                    ifelse(variable=="B19001_010", "$45,000 to $49,999",
-                      ifelse(variable=="B19001_011", "$50,000 to $59,999",
-                        ifelse(variable=="B19001_012", "$60,000 to $74,999",
-                          ifelse(variable=="B19001_013", "$75,000 to $99,999",
-                            ifelse(variable=="B19001_014", "$100,000 to $124,999",
-                              ifelse(variable=="B19001_015", "$125,000 to $149,999",
-                                ifelse(variable=="B19001_016", "$150,000 to $199,999",
-                                  ifelse(variable=="B19001_017", "$200,000 or more",
-                                    NA)))))))))))))))))) %>%
-  mutate(inc_category = ifelse(variable=="B19001_001", "Total",
-    ifelse(variable=="B19001_002", "Very Low",
-      ifelse(variable=="B19001_003", "Very Low",
-        ifelse(variable=="B19001_004", "Very Low",
-          ifelse(variable=="B19001_005", "Very Low",
-            ifelse(variable=="B19001_006", "Very Low",
-              ifelse(variable=="B19001_007", "Low",
-                ifelse(variable=="B19001_008", "Low",
-                  ifelse(variable=="B19001_009", "Low",
-                    ifelse(variable=="B19001_010", "Low",
-                      ifelse(variable=="B19001_011", "Low",
-                        ifelse(variable=="B19001_012", "Middle",
-                          ifelse(variable=="B19001_013", "Middle",
-                            ifelse(variable=="B19001_014", "Middle",
-                              ifelse(variable=="B19001_015", "Middle",
-                                ifelse(variable=="B19001_016", "High",
-                                  ifelse(variable=="B19001_017", "High",
-                                    NA)))))))))))))))))) %>%
-  filter(inc_category != "Total") %>%
-   rename(blkgrp_id = GEOID,
-          number = estimate) %>% 
-   select(c(YEAR, blkgrp_id, inc_category, number))
-
-# Calculate total population by block group & year
-acs_income_total <- acs_income %>%
-  group_by(YEAR, blkgrp_id) %>%
-    summarize(blkgrp_pop=sum(number)) %>%
-      data.frame()
-
-acs_income_sum <- acs_income %>%
-  group_by(YEAR, blkgrp_id, inc_category) %>%
-    summarize(sum_number = sum(number)) %>%
-      spread(key = inc_category, value = sum_number) %>%
-        rename(inc_high = High, inc_middle = Middle, inc_low = Low, inc_very_low = "Very Low")
-
-# Merge total & sum and calculate ratio
-acs_income_pct <- merge(acs_income_total, acs_income_sum, by=c("YEAR", "blkgrp_id"))
-
-acs_income_pct <- acs_income_pct %>%
+acs_income <- data_wide %>%
+  data.frame() %>%
+  rename(blkgrp_id = GEOID) %>%
+  mutate(YEAR = as.integer(column_label) + 2012,
+         county_id = substr(blkgrp_id, 1, 5)) %>%
+  select(-c(column_label)) %>%
+  left_join(wts, by=c("YEAR", "county_id")) %>%
+  group_by(blkgrp_id, YEAR) %>%
+  summarize(inc_low = sum(c_across(B19001_002
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI80_loc[1]-1)==1, paste0("0", as.character(AMI80_loc[1]-1)),
+            as.character(AMI80_loc[1]-1))))), na.rm=TRUE),
+    inc_moderate = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI80_loc[1])==1, paste0("0", as.character(AMI80_loc[1])),
+            as.character(AMI80_loc[1]))))
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI120_loc[1]-1)==1, paste0("0", as.character(AMI120_loc[1]-1)),
+            as.character(AMI120_loc[1]-1))))), na.rm=TRUE),
+    inc_middle = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI120_loc[1])==1, paste0("0", as.character(AMI120_loc[1])),
+            as.character(AMI120_loc[1]))))
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI165_loc[1]-1)==1, paste0("0", as.character(AMI165_loc[1]-1)),
+            as.character(AMI165_loc[1]-1))))), na.rm=TRUE),
+    inc_high = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI165_loc[1])==1, paste0("0", as.character(AMI165_loc[1])),
+      as.character(AMI165_loc[1]))))
+      :B19001_017), na.rm=TRUE)) %>%
+  mutate(blkgrp_pop = inc_low+inc_moderate+inc_middle+inc_high) %>%
   mutate(inc_high_pct = inc_high/blkgrp_pop,
          inc_middle_pct = inc_middle/blkgrp_pop,
-         inc_low_pct = inc_low/blkgrp_pop,
-         inc_very_low_pct = inc_very_low/blkgrp_pop) %>%
+         inc_moderate_pct = inc_moderate/blkgrp_pop,
+         inc_low_pct = inc_low/blkgrp_pop) %>%
   mutate(entropy_income =
-      (4*inc_very_low_pct*(1-inc_very_low_pct) +
-      4*(inc_very_low_pct+inc_low_pct)*(1-inc_very_low_pct-inc_low_pct) +
-      4*(inc_very_low_pct+inc_low_pct+inc_middle_pct)*(1-inc_very_low_pct-inc_low_pct-inc_middle_pct))/3) %>%
-    arrange(blkgrp_id, YEAR)
+      (4*inc_low_pct*(1-inc_low_pct) +
+      4*(inc_low_pct+inc_moderate_pct)*(1-inc_low_pct-inc_moderate_pct) +
+      4*(inc_low_pct+inc_moderate_pct+inc_middle_pct)*(1-inc_low_pct-inc_moderate_pct-inc_middle_pct))/3) %>%
+    arrange(blkgrp_id, YEAR) %>%
+    ungroup()
 
 #** B. Census Tracts ---------------------------------------------
 
@@ -160,99 +149,72 @@ acs_income_pct <- acs_income_pct %>%
 
 all_data <- bind_rows(data_list, .id = "column_label")
 
+# Convert into a long format
+data_wide <- spread(all_data, key = "variable", value = "estimate")
+
 # Unlist the data and add variables for calculation
-acs_income <- all_data %>% 
-   data.frame() %>%
-   mutate(YEAR = as.integer(column_label) + 2012) %>%
-   mutate(inc_category_raw = ifelse(variable=="B19001_001", "Total",
-    ifelse(variable=="B19001_002", "Less than $10,000",
-      ifelse(variable=="B19001_003", "$10,000 to $14,999",
-        ifelse(variable=="B19001_004", "$15,000 to $19,999",
-          ifelse(variable=="B19001_005", "$20,000 to $24,999",
-            ifelse(variable=="B19001_006", "$25,000 to $29,999",
-              ifelse(variable=="B19001_007", "$30,000 to $34,999",
-                ifelse(variable=="B19001_008", "$35,000 to $39,999",
-                  ifelse(variable=="B19001_009", "$40,000 to $44,999",
-                    ifelse(variable=="B19001_010", "$45,000 to $49,999",
-                      ifelse(variable=="B19001_011", "$50,000 to $59,999",
-                        ifelse(variable=="B19001_012", "$60,000 to $74,999",
-                          ifelse(variable=="B19001_013", "$75,000 to $99,999",
-                            ifelse(variable=="B19001_014", "$100,000 to $124,999",
-                              ifelse(variable=="B19001_015", "$125,000 to $149,999",
-                                ifelse(variable=="B19001_016", "$150,000 to $199,999",
-                                  ifelse(variable=="B19001_017", "$200,000 or more",
-                                    NA)))))))))))))))))) %>%
-  mutate(inc_category = ifelse(variable=="B19001_001", "Total",
-    ifelse(variable=="B19001_002", "Very Low",
-      ifelse(variable=="B19001_003", "Very Low",
-        ifelse(variable=="B19001_004", "Very Low",
-          ifelse(variable=="B19001_005", "Very Low",
-            ifelse(variable=="B19001_006", "Very Low",
-              ifelse(variable=="B19001_007", "Low",
-                ifelse(variable=="B19001_008", "Low",
-                  ifelse(variable=="B19001_009", "Low",
-                    ifelse(variable=="B19001_010", "Low",
-                      ifelse(variable=="B19001_011", "Low",
-                        ifelse(variable=="B19001_012", "Middle",
-                          ifelse(variable=="B19001_013", "Middle",
-                            ifelse(variable=="B19001_014", "Middle",
-                              ifelse(variable=="B19001_015", "Middle",
-                                ifelse(variable=="B19001_016", "High",
-                                  ifelse(variable=="B19001_017", "High",
-                                    NA)))))))))))))))))) %>%
-  filter(inc_category != "Total") %>%
-   rename(tract_id = GEOID,
-          number = estimate) %>% 
-   select(c(YEAR, tract_id, inc_category, number))
-
-# Calculate total population by block group & year
-acs_income_total <- acs_income %>%
-  group_by(YEAR, tract_id) %>%
-    summarize(tract_pop=sum(number)) %>%
-      data.frame()
-
-acs_income_sum <- acs_income %>%
-  group_by(YEAR, tract_id, inc_category) %>%
-    summarize(sum_number = sum(number)) %>%
-      spread(key = inc_category, value = sum_number) %>%
-        rename(inc_high = High, inc_middle = Middle, inc_low = Low, inc_very_low = "Very Low")
-
-# Merge total & sum and calculate ratio
-acs_income_pct_tract <- merge(acs_income_total, acs_income_sum, by=c("YEAR", "tract_id"))
-
-acs_income_pct_tract <- acs_income_pct_tract %>%
+acs_income_tract <- data_wide %>%
+  data.frame() %>%
+  rename(tract_id = GEOID) %>%
+  mutate(YEAR = as.integer(column_label) + 2012,
+         county_id = substr(tract_id, 1, 5)) %>%
+  select(-c(column_label)) %>%
+  left_join(wts, by=c("YEAR", "county_id")) %>%
+  group_by(tract_id, YEAR) %>%
+  summarize(inc_low = sum(c_across(B19001_002
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI80_loc[1]-1)==1, paste0("0", as.character(AMI80_loc[1]-1)),
+            as.character(AMI80_loc[1]-1))))), na.rm=TRUE),
+    inc_moderate = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI80_loc[1])==1, paste0("0", as.character(AMI80_loc[1])),
+            as.character(AMI80_loc[1]))))
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI120_loc[1]-1)==1, paste0("0", as.character(AMI120_loc[1]-1)),
+            as.character(AMI120_loc[1]-1))))), na.rm=TRUE),
+    inc_middle = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI120_loc[1])==1, paste0("0", as.character(AMI120_loc[1])),
+            as.character(AMI120_loc[1]))))
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI165_loc[1]-1)==1, paste0("0", as.character(AMI165_loc[1]-1)),
+            as.character(AMI165_loc[1]-1))))), na.rm=TRUE),
+    inc_high = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI165_loc[1])==1, paste0("0", as.character(AMI165_loc[1])),
+      as.character(AMI165_loc[1]))))
+      :B19001_017), na.rm=TRUE)) %>%
+  mutate(tract_pop = inc_low+inc_moderate+inc_middle+inc_high) %>%
   mutate(inc_high_pct = inc_high/tract_pop,
          inc_middle_pct = inc_middle/tract_pop,
-         inc_low_pct = inc_low/tract_pop,
-         inc_very_low_pct = inc_very_low/tract_pop) %>%
+         inc_moderate_pct = inc_moderate/tract_pop,
+         inc_low_pct = inc_low/tract_pop) %>%
   mutate(entropy_income =
-      (4*inc_very_low_pct*(1-inc_very_low_pct) +
-      4*(inc_very_low_pct+inc_low_pct)*(1-inc_very_low_pct-inc_low_pct) +
-      4*(inc_very_low_pct+inc_low_pct+inc_middle_pct)*(1-inc_very_low_pct-inc_low_pct-inc_middle_pct))/3) %>%
-    arrange(tract_id, YEAR)
+      (4*inc_low_pct*(1-inc_low_pct) +
+      4*(inc_low_pct+inc_moderate_pct)*(1-inc_low_pct-inc_moderate_pct) +
+      4*(inc_low_pct+inc_moderate_pct+inc_middle_pct)*(1-inc_low_pct-inc_moderate_pct-inc_middle_pct))/3) %>%
+    arrange(tract_id, YEAR) %>%
+    ungroup()
 
 # Calculate regional-level entropy
-acs_income_city <- acs_income_pct_tract %>%
+acs_income_city <- acs_income_tract %>%
   group_by(YEAR) %>%
     summarize(inc_high_city = sum(inc_high, na.rm=TRUE),
       inc_middle_city = sum(inc_middle, na.rm=TRUE),
+      inc_moderate_city = sum(inc_moderate, na.rm=TRUE),
       inc_low_city = sum(inc_low, na.rm=TRUE),
-      inc_very_low_city = sum(inc_very_low, na.rm=TRUE),
       city_pop = sum(tract_pop, na.rm=TRUE)) %>%
   mutate(inc_high_pct = inc_high_city/city_pop,
          inc_middle_pct = inc_middle_city/city_pop,
-         inc_low_pct = inc_low_city/city_pop,
-         inc_very_low_pct = inc_very_low_city/city_pop) %>%
+         inc_moderate_pct = inc_moderate_city/city_pop,
+         inc_low_pct = inc_low_city/city_pop) %>%
   mutate(entropy_income_city =
-      (4*inc_very_low_pct*(1-inc_very_low_pct) +
-      4*(inc_very_low_pct+inc_low_pct)*(1-inc_very_low_pct-inc_low_pct) +
-      4*(inc_very_low_pct+inc_low_pct+inc_middle_pct)*(1-inc_very_low_pct-inc_low_pct-inc_middle_pct))/3) %>%
+      (4*inc_low_pct*(1-inc_low_pct) +
+      4*(inc_low_pct+inc_moderate_pct)*(1-inc_low_pct-inc_moderate_pct) +
+      4*(inc_low_pct+inc_moderate_pct+inc_middle_pct)*(1-inc_low_pct-inc_moderate_pct-inc_middle_pct))/3) %>%
   select(YEAR, city_pop, entropy_income_city)
 
 #** C. Calculate regional segregation levels --------------------
 
-acs_income_seg <- left_join(acs_income_pct, acs_income_city, by="YEAR")
-acs_income_seg_tract <- left_join(acs_income_pct_tract, acs_income_city, by="YEAR")
+acs_income_seg <- left_join(acs_income, acs_income_city, by="YEAR")
+acs_income_seg_tract <- left_join(acs_income_tract, acs_income_city, by="YEAR")
 
 acs_income_seg_sum <- acs_income_seg %>%
     mutate(ent_diff = entropy_income_city-entropy_income) %>%
@@ -281,9 +243,9 @@ write.csv(acs_income_seg_sum_tract, paste0("saved/sf_segregation_income_tract_",
 #** D. Merge the block group and census tract dataframes --------
 
 # Subset the block_group ID to create census tract code then merge
-acs_income_pct$tract_id <- substr(acs_income_pct$blkgrp_id, 1, 11)
+acs_income$tract_id <- substr(acs_income$blkgrp_id, 1, 11)
 
-acs_income_seg <- left_join(acs_income_pct, acs_income_pct_tract,
+acs_income_seg <- left_join(acs_income, acs_income_tract,
                     by=c("tract_id", "YEAR"),
                    suffix = c("_blkgrp", "_tract"),
                     all.x=TRUE)
@@ -295,13 +257,19 @@ acs_income_seg <- left_join(acs_income_seg, acs_income_seg_sum,
 
 # Replace missing block group ratio values with tract values
 acs_income_seg <- acs_income_seg %>%
-  mutate(entropy_income = ifelse(is.na(entropy_income_blkgrp == TRUE), entropy_income_tract, entropy_income_blkgrp),
-        inc_very_low = ifelse(is.na(inc_very_low_blkgrp == TRUE), inc_very_low_tract, inc_very_low_blkgrp),
-          inc_low = ifelse(is.na(inc_low_blkgrp == TRUE), inc_low_tract, inc_low_blkgrp),
+    mutate(inc_low = ifelse(is.na(inc_low_blkgrp == TRUE), inc_low_tract, inc_low_blkgrp),
+          inc_moderate = ifelse(is.na(inc_moderate_blkgrp == TRUE), inc_moderate_tract, inc_moderate_blkgrp),
             inc_middle = ifelse(is.na(inc_middle_blkgrp == TRUE), inc_middle_tract, inc_middle_blkgrp),
-                   inc_high = ifelse(is.na(inc_high_blkgrp == TRUE), inc_high_tract, inc_high_blkgrp)) %>% 
+                   inc_high = ifelse(is.na(inc_high_blkgrp == TRUE), inc_high_tract, inc_high_blkgrp),
+                  inc_low_pct = ifelse(is.na(inc_low_pct_blkgrp == TRUE), inc_low_pct_tract, inc_low_pct_blkgrp),
+          inc_moderate_pct = ifelse(is.na(inc_moderate_pct_blkgrp == TRUE), inc_moderate_pct_tract, inc_moderate_pct_blkgrp),
+            inc_middle_pct = ifelse(is.na(inc_middle_pct_blkgrp == TRUE), inc_middle_pct_tract, inc_middle_pct_blkgrp),
+                   inc_high_pct = ifelse(is.na(inc_high_pct_blkgrp == TRUE), inc_high_pct_tract, inc_high_pct_blkgrp)) %>%
+mutate(entropy_income =
+      (4*inc_low_pct*(1-inc_low_pct) +
+      4*(inc_low_pct+inc_moderate_pct)*(1-inc_low_pct-inc_moderate_pct) +
+      4*(inc_low_pct+inc_moderate_pct+inc_middle_pct)*(1-inc_low_pct-inc_moderate_pct-inc_middle_pct))/3) %>%
     arrange(YEAR, blkgrp_id)
-
 
 acs_income_final <- left_join(acs_income_seg, acs_income_seg_sum_tract,
                     by=c("YEAR"),
@@ -561,13 +529,26 @@ acs_race_seg <- left_join(acs_race_pct, acs_race_pct_tract,
 
 # Replace missing block group ratio values with tract values
 acs_race_seg <- acs_race_seg %>%
-  mutate(entropy_race = ifelse(is.na(entropy_race_blkgrp == TRUE), entropy_race_tract, entropy_race_blkgrp),
-        race_white = ifelse(is.na(race_white_blkgrp == TRUE), race_white_tract, race_white_blkgrp),
+  mutate(race_white = ifelse(is.na(race_white_blkgrp == TRUE), race_white_tract, race_white_blkgrp),
           race_black = ifelse(is.na(race_black_blkgrp == TRUE), race_black_tract, race_black_blkgrp),
             race_asian = ifelse(is.na(race_asian_blkgrp == TRUE), race_asian_tract, race_asian_blkgrp),
               race_latinx = ifelse(is.na(race_latinx_blkgrp == TRUE), race_latinx_tract, race_latinx_blkgrp),
-                   race_other = ifelse(is.na(race_other_blkgrp == TRUE), race_other_tract, race_other_blkgrp)) %>% 
-    arrange(YEAR, blkgrp_id)
+                   race_other = ifelse(is.na(race_other_blkgrp == TRUE), race_other_tract, race_other_blkgrp),
+                   race_white_pct = ifelse(is.na(race_white_pct_blkgrp == TRUE), race_white_pct_tract, race_white_pct_blkgrp),
+          race_black_pct = ifelse(is.na(race_black_pct_blkgrp == TRUE), race_black_pct_tract, race_black_pct_blkgrp),
+            race_asian_pct = ifelse(is.na(race_asian_pct_blkgrp == TRUE), race_asian_pct_tract, race_asian_pct_blkgrp),
+              race_latinx_pct = ifelse(is.na(race_latinx_pct_blkgrp == TRUE), race_latinx_pct_tract, race_latinx_pct_blkgrp),
+                   race_other_pct = ifelse(is.na(race_other_pct_blkgrp == TRUE), race_other_pct_tract, race_other_pct_blkgrp)) %>%
+  rowwise() %>%
+  mutate(entropy_race =
+    sum(race_white_pct*log(1/race_white_pct) +
+        race_black_pct*log(1/race_black_pct) +
+        race_asian_pct*log(1/race_asian_pct) +
+        race_latinx_pct*log(1/race_latinx_pct) +
+        race_other_pct*log(1/race_other_pct), na.rm=TRUE)) %>%
+    arrange(YEAR, blkgrp_id) %>%
+    ungroup()
+
 
 # Merge the segregation index calculated at the block group and tract-level
 acs_race_seg <- left_join(acs_race_seg, acs_race_seg_sum,
@@ -595,6 +576,7 @@ segregation <- segregation_raw %>%
   rename(entropy_race_city = entropy_race_city.y)
 
 glimpse(segregation)
+summary(segregation)
 
 # Export the dataset
 write.csv(segregation, paste0("segregation_", region, ".csv"), row.names=FALSE)

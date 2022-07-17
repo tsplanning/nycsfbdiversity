@@ -501,22 +501,58 @@ county_inc <- county_joined %>%
 all_data <- bind_rows(data_list, .id = "column_label")
 
 # Unlist the data and add variables for calculation
-county_income <- all_data %>% 
+county_income <- all_data %>%
    data.frame() %>%
    mutate(YEAR = as.integer(column_label) + 2012) %>%
-   rename(county_id = GEOID) %>% 
+   rename(county_id = GEOID) %>%
    select(c(YEAR, county_id, variable, estimate))
 
 # Convert into a long format
 income_wide <- spread(county_income, key = "variable", value = "estimate")
 
-# Calculate Proportions
+# Read the income cutoffs for each city
+if (region=="nyc") { wts <- read.csv("weights_nyc.csv")
+} else if (region=="sfb") { wts <- read.csv("weights_sfb.csv") }
+
+wts <- wts %>%
+  mutate(county_id = ifelse(nchar(county_id)==4,
+          as.character(paste0("0", county_id)), as.character(county_id)))
+
+# Find the closest matching value in the census income categories
+census_inc_category <- c(10000, 14999, 19999, 24999, 29999, 34999, 39999, 44999,
+                          49999, 59999, 74999, 999999, 124999, 14999, 19999, 200000)
+
+# Locate the indices for the closest matching values
+wts$AMI80_loc <- sapply(wts$AMI80, function(x) which.min(abs(census_inc_category - x)))
+wts$AMI120_loc <- sapply(wts$AMI120, function(x) which.min(abs(census_inc_category - x)))
+wts$AMI165_loc <- sapply(wts$AMI165, function(x) which.min(abs(census_inc_category - x)))
+
+# Unlist the data and add variables for calculation
 county_income <- income_wide %>%
-	rowwise() %>%
-	mutate(inc_very_low_pct = 100*sum(B19001_002, B19001_003, B19001_004, B19001_005, B19001_006, na.rm=TRUE)/B19001_001,
-	inc_low_pct = 100*sum(B19001_002, B19001_003, B19001_004, B19001_005, B19001_006, B19001_007, B19001_008, B19001_009, B19001_010, B19001_011, na.rm=TRUE)/B19001_001) %>%
-	select(c(county_id, YEAR, inc_very_low_pct, inc_low_pct)) %>%
-	ungroup()
+  left_join(wts, by=c("YEAR", "county_id")) %>%
+  group_by(county_id, YEAR) %>%
+  summarize(inc_low = sum(c_across(B19001_002
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI80_loc[1]-1)==1, paste0("0", as.character(AMI80_loc[1]-1)),
+            as.character(AMI80_loc[1]-1))))), na.rm=TRUE),
+    inc_moderate = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI80_loc[1])==1, paste0("0", as.character(AMI80_loc[1])),
+            as.character(AMI80_loc[1]))))
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI120_loc[1]-1)==1, paste0("0", as.character(AMI120_loc[1]-1)),
+            as.character(AMI120_loc[1]-1))))), na.rm=TRUE),
+    inc_middle = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI120_loc[1])==1, paste0("0", as.character(AMI120_loc[1])),
+            as.character(AMI120_loc[1]))))
+          :as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI165_loc[1]-1)==1, paste0("0", as.character(AMI165_loc[1]-1)),
+            as.character(AMI165_loc[1]-1))))), na.rm=TRUE),
+    inc_high = sum(c_across(as.symbol(paste0("B19001_0",
+            ifelse(nchar(AMI165_loc[1])==1, paste0("0", as.character(AMI165_loc[1])),
+      as.character(AMI165_loc[1]))))
+      :B19001_017), na.rm=TRUE)) %>%
+  mutate(county_pop = inc_low+inc_moderate+inc_middle+inc_high) %>%
+  mutate(inc_low_pct = inc_low/county_pop)
 
 county_income_2013 <- county_income %>%
 	filter(YEAR==2013) %>%
@@ -529,10 +565,9 @@ county_income_2019 <- county_income %>%
 county_income <- county_income %>%
 	left_join(county_income_2013, by="county_id", suffix=c("", "_13")) %>%
 	left_join(county_income_2019, by="county_id", suffix=c("", "_19")) %>%
-	mutate(inc_very_low_pct_inc = ifelse(inc_very_low_pct_13==0, NA, 100*(inc_very_low_pct_19-inc_very_low_pct_13)/inc_very_low_pct_13),
-		inc_low_pct_inc = ifelse(inc_low_pct_13==0, NA, 100*(inc_very_low_pct_19-inc_low_pct_13)/inc_low_pct_13)) %>%
+	mutate(inc_low_pct_inc = ifelse(inc_low_pct_13==0, NA, 100*(inc_low_pct_19-inc_low_pct_13)/inc_low_pct_13)) %>%
 	filter(YEAR==2019) %>%
-	select(county_id, inc_very_low_pct_13, inc_low_pct_13, inc_very_low_pct_19, inc_low_pct_19, inc_very_low_pct_inc, inc_low_pct_inc)
+	select(county_id, inc_low_pct_13, inc_low_pct_19, inc_low_pct_inc)
 
  if (region=="sfb") {
  	seg <- read.csv("segregation_sfb.csv")
@@ -546,9 +581,8 @@ county_income <- county_income %>%
 
 	seg <- seg%>%
 		rowwise() %>%
-		mutate(inc_very_low_pct = 100*inc_very_low/sum(inc_very_low, inc_low, inc_middle, inc_high, na.rm=TRUE),
-		inc_low_pct = 100*sum(inc_very_low, inc_low, na.rm=TRUE)/sum(inc_very_low, inc_low, inc_middle, inc_high, na.rm=TRUE)) %>%
-		select(blkgrp_id, YEAR, inc_very_low_pct, inc_low_pct) %>%
+		mutate(inc_low_pct = 100*inc_low/sum(inc_low, inc_moderate, inc_middle, inc_high, na.rm=TRUE)) %>%
+		select(blkgrp_id, YEAR, inc_low_pct) %>%
 		ungroup()
 
 	seg_13 <- seg %>%
@@ -562,10 +596,9 @@ county_income <- county_income %>%
 	seg <- seg %>%
 		left_join(seg_13, by="blkgrp_id", suffix=c("", "_13")) %>% 
 		left_join(seg_19, by="blkgrp_id", suffix=c("", "_19")) %>%
-		mutate(inc_very_low_pct_inc = ifelse(inc_very_low_pct_13==0, NA, 100*(inc_very_low_pct_19-inc_very_low_pct_13)/inc_very_low_pct_13),
-		inc_low_pct_inc = ifelse(inc_low_pct_13==0, NA, 100*(inc_very_low_pct_19-inc_low_pct_13)/inc_low_pct_13)) %>%
+		mutate(inc_low_pct_inc = ifelse(inc_low_pct_13==0, NA, 100*(inc_low_pct_19-inc_low_pct_13)/inc_low_pct_13)) %>%
 	filter(YEAR==2019) %>%
-	select(blkgrp_id, inc_very_low_pct_13, inc_low_pct_13, inc_very_low_pct_19, inc_low_pct_19, inc_very_low_pct_inc, inc_low_pct_inc) %>%
+	select(blkgrp_id, inc_low_pct_13, inc_low_pct_19, inc_low_pct_inc) %>%
 	# For merging later
 	mutate(blkgrp_id = as.character(blkgrp_id))
  
@@ -597,7 +630,7 @@ gent_chapple <- data_100 %>%
                                    gent_chapple != 1 &
                                    pr_city == 1, 1, 0)) %>%
   ungroup() %>%
-  select(blkgrp_id, v1, v2_1, v2_2, v2_3, v2_4, v2_count, price_inc, gent_chapple, non_gent_chapple, vulnerable_chapple) %>%
+  select(blkgrp_id, v1, v2_1, v2_2, v2_3, v2_4, v2_count, price_inc, gent_chapple, non_gent_chapple, vulnerable_chapple, pr_city) %>%
   # For merging later
   mutate(blkgrp_id = as.character(blkgrp_id))
   # Need to created a combined categorical variable
@@ -613,6 +646,20 @@ data_joined <- data_joined %>%
 # Merge the control & gentrification datasets
 # Export the final dataset - something is happening here! A very big dataset.
 gent_final <- merge(gent_freeman, gent_chapple, by="blkgrp_id") 
+
+glimpse(gent_final)
+
+gent_final <- gent_final %>%
+  mutate(nb_freeman = ifelse(gent_freeman == 1, "Gentrifying",
+                        ifelse(non_gent_freeman == 1, "Non-gentrifying",
+                          ifelse(pr_city==1 & gent_freeman!=1 & non_gent_freeman!=1, "Non-vulnerable",
+                            ifelse(pr_city==0, "Non-city", NA)))),
+        nb_chapple = ifelse(gent_chapple == 1, "Gentrifying",
+                      ifelse(non_gent_chapple == 1, "Non-gentriyfing",
+                        ifelse(pr_city == 1 & vulnerable_chapple !=1, "Non-vulnerable",
+                          ifelse(pr_city==0, "Non-city", NA)))))
+
+glimpse(gent_final)
 
 # Export the final dataset
 write.csv(data_joined, paste0("controls_", region, ".csv"))
